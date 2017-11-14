@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/fatih/color"
 	"gopkg.in/yaml.v2"
 )
 
@@ -86,51 +87,58 @@ func searchForManifests(root string) []string {
 	return manifests
 }
 
+func checkEntry(e SourceEntry) (string, error) {
+	if len(e.URL) != 0 {
+		return fmt.Sprintf("Raw url specified, cannot check for currency: %s", e.URL), nil
+	}
+	owner, gitrepo, err := parseRepo(e.Repo)
+	if err != nil {
+		return "", err
+	}
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, gitrepo)
+	res, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("There was an error retrieving the latest release for %s\n%v", e.Repo, err)
+	}
+	bodyBs, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return "", fmt.Errorf("unable to read body of url %s\n%v", e.URL, err)
+	}
+	var gitObj map[string]*json.RawMessage
+	err = json.Unmarshal(bodyBs, &gitObj)
+	if err != nil {
+		return "", fmt.Errorf("unable to parse body of url %s\n%v\n body:\n%s", e.URL, err, string(bodyBs))
+	}
+
+	if gitObj["name"] == nil {
+		m := color.YellowString("Unable to check currency, latest release undefined for %s", e.Repo)
+		return m, nil
+	}
+	var tag string
+	err = json.Unmarshal(*gitObj["name"], tag)
+	rel, err := compareSemver(e.Tag, tag)
+	if err != nil {
+		return "", err
+	}
+	if rel < 0 {
+		m := color.RedString(`There is a newer version of: %s
+			have: %s
+			latest: %s`, e.Repo, e.Tag, tag)
+		return m, nil
+	} else {
+		m := color.GreenString("Up to date: %s", e.Repo)
+		return m, nil
+	}
+}
+
 func checkNewer(config Config) ([]string, error) {
 	msgs := []string{}
 	for _, e := range config.Sources {
-		if len(e.URL) != 0 {
-			msgs = append(msgs, fmt.Sprintf("Raw url specified, cannot check for currency: %s", e.URL))
-			continue
-		}
-		owner, gitrepo, err := parseRepo(e.Repo)
+		m, err := checkEntry(e)
 		if err != nil {
 			return msgs, err
 		}
-		url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, gitrepo)
-		res, err := http.Get(url)
-		if err != nil {
-			return msgs, fmt.Errorf("There was an error retrieving the latest release for %s\n%v", e.Repo, err)
-		}
-		bodyBs, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return msgs, fmt.Errorf("unable to read body of url %s\n%v", e.URL, err)
-		}
-		var gitObj map[string]*json.RawMessage
-		err = json.Unmarshal(bodyBs, &gitObj)
-		if err != nil {
-			return msgs, fmt.Errorf("unable to parse body of url %s\n%v\n body:\n%s", e.URL, err, string(bodyBs))
-		}
-
-		if gitObj["name"] == nil {
-			msgs = append(msgs, fmt.Sprintf("Unable to check currency of %s", e.Repo))
-			continue
-		}
-		var tag string
-		err = json.Unmarshal(*gitObj["name"], tag)
-		rel, err := compareSemver(e.Tag, tag)
-		if err != nil {
-			return msgs, err
-		}
-		if rel < 0 {
-			msg := fmt.Sprintf(`There is a newer version of: %s
-			have: %s
-			latest: %s`, e.Repo, e.Tag, tag)
-			msgs = append(msgs, msg)
-		} else {
-			msg := fmt.Sprintf("Up to date: %s", e.Repo)
-			msgs = append(msgs, msg)
-		}
+		msgs = append(msgs, m)
 	}
 	return msgs, nil
 }
